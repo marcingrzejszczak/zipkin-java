@@ -37,6 +37,7 @@ import zipkin.server.ZipkinServerProperties.Store.Type;
 import zipkin.server.brave.TraceWritesSpanStore;
 
 @Configuration
+@ConditionalOnMissingBean(ZipkinServerConfiguration.class)
 @EnableConfigurationProperties(ZipkinServerProperties.class)
 @EnableAsync(proxyTargetClass=true)
 public class ZipkinServerConfiguration {
