@@ -23,6 +23,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Collectors;
 import javax.sql.DataSource;
 import org.jooq.Cursor;
@@ -46,6 +47,7 @@ import zipkin.BinaryAnnotation;
 import zipkin.BinaryAnnotation.Type;
 import zipkin.DependencyLink;
 import zipkin.Endpoint;
+import zipkin.InMemorySpanStore;
 import zipkin.QueryRequest;
 import zipkin.Span;
 import zipkin.SpanStore;
@@ -77,6 +79,8 @@ public final class JDBCSpanStore implements SpanStore {
   private final DataSource datasource;
   private final Settings settings;
   private final ExecuteListenerProvider listenerProvider;
+  // TODO: Add retention
+  private final InMemorySpanStore cache = new InMemorySpanStore();
 
   public JDBCSpanStore(DataSource datasource, Settings settings, @Nullable ExecuteListenerProvider listenerProvider) {
     this.datasource = checkNotNull(datasource, "datasource");
@@ -92,13 +96,16 @@ public final class JDBCSpanStore implements SpanStore {
   }
 
   @Override
-  public void accept(Iterator<Span> spans) {
-    if (!spans.hasNext()) return;
+  public void accept(Iterator<Span> spansIterator) {
+    if (!spansIterator.hasNext()) return;
+    Collection<Span> iteratorCache = new ArrayList<>();
+    while (spansIterator.hasNext()) iteratorCache.add(spansIterator.next());
+    cache.accept(iteratorCache.iterator());
     try (Connection conn = datasource.getConnection()) {
       DSLContext create = context(conn);
 
       List<Query> inserts = new ArrayList<>();
-
+      Iterator<Span> spans = iteratorCache.iterator();
       while (spans.hasNext()) {
         Span span = ApplyTimestampAndDuration.apply(spans.next());
         Long binaryAnnotationTimestamp = span.timestamp;
@@ -113,9 +120,11 @@ public final class JDBCSpanStore implements SpanStore {
         if (span.timestamp != null) {
           updateFields.put(ZIPKIN_SPANS.START_TS, span.timestamp);
         }
+
         if (span.duration != null) {
-          updateFields.put(ZIPKIN_SPANS.DURATION, span.duration);
+          updateFields.put(ZIPKIN_SPANS.DURATION, getDurationFromCacheIfPresent(span));
         }
+
 
         InsertSetMoreStep<Record> insertSpan = create.insertInto(ZIPKIN_SPANS)
             .set(ZIPKIN_SPANS.TRACE_ID, span.traceId)
@@ -165,6 +174,21 @@ public final class JDBCSpanStore implements SpanStore {
     } catch (SQLException e) {
       throw new RuntimeException(e); // TODO
     }
+  }
+
+  private long getDurationFromCacheIfPresent(Span span) {
+    List<List<Span>> cachedSpans = cache
+        .getTracesByIds(Collections.singletonList(span.traceId));
+    if (cachedSpans.size() == 1) {
+      List<Span> spansForTraceId = cachedSpans.get(0);
+      Optional<Span> spanWithSameId = spansForTraceId.stream()
+          .filter(s -> s.id == span.id).findFirst();
+      if (spanWithSameId.isPresent()) {
+        // this duration will be the merged one
+        return spanWithSameId.get().duration;
+      }
+    }
+    return span.duration;
   }
 
   List<List<Span>> getTraces(@Nullable QueryRequest request, @Nullable Collection<Long> traceIds) {
@@ -228,6 +252,7 @@ public final class JDBCSpanStore implements SpanStore {
         }
         trace.add(span.build());
       }
+      cache.accept(trace.iterator());
       trace = CorrectForClockSkew.apply(trace);
       result.add(trace);
     }
