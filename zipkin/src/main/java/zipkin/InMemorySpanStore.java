@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+
 import zipkin.async.AsyncSpanConsumer;
 import zipkin.async.AsyncSpanStore;
 import zipkin.async.Callback;
@@ -208,9 +209,9 @@ public final class InMemorySpanStore implements SpanStore, AsyncSpanStore, Async
 
     for (Collection<Span> trace : traceIdToSpans.delegate.values()) {
       if (trace.isEmpty()) continue;
-
+      Collection<Span> mergedSpans = CorrectForClockSkew.apply(MergeById.apply(trace));
       List<DependencyLinkSpan> linkSpans = new LinkedList<>();
-      for (Span s : trace) {
+      for (Span s : mergedSpans) {
         Long timestamp = s.timestamp;
         if (timestamp == null ||
             timestamp < (endTs - lookback) ||
